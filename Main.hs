@@ -4,13 +4,12 @@ import Control.Applicative
 import Data.Char
 import qualified Data.Map.Strict as Map
 
-newtype HTMLField = HTMLField String deriving (Show, Eq)
-type HTMLProperty = Map.Map String String 
-data HTMLValue = HTMLText String 
-    | HTMLValue HTMLField [HTMLProperty] [HTMLValue] HTMLValue
-    deriving (Show, Eq)
+type HTMLAttributes = Map.Map String String
 
-type HTML = Map.Map HTMLField HTMLValue
+data HTMLValue = HTMLText String
+    | HTMLSeq [HTMLValue]
+    | HTMLField HTMLAttributes HTMLValue
+    deriving (Show, Eq)
 
 type ParserInput = String
 newtype ParserError = ParserError String deriving (Show, Eq)
@@ -48,8 +47,14 @@ parseChar x = Parser f
     where 
         f (y:ys)
             | y == x = Right $ ParserSuccess ys y 
-            | otherwise = Left $ ParserError [y]
+            | otherwise = Left $ ParserError $ "Expected: " ++ [x] ++ " Found: " ++ [y] 
         f [] = Left $ ParserError ""
+
+sepBy :: Parser a -> Parser b -> Parser [b]
+sepBy sep element = (:) <$> element <*> many (sep *> element) <|> pure [] 
+
+ws :: Parser String
+ws = parseSpan isSpace
 
 parseString :: String -> Parser String
 parseString s = Parser $ \input -> 
@@ -60,17 +65,46 @@ parseString s = Parser $ \input ->
 parseAny :: Parser String
 parseAny = parseSpan (/= '"')
 
-htmlString :: Parser HTMLValue
-htmlString = fmap HTMLText $ parseChar '"' *> parseAny <* parseChar '"'
+parseNotIn :: String -> Parser String
+parseNotIn = foldl1 (<|>) . parsers
+    where parsers = map (\c -> parseSpan (/= c))
+
+stringLiteral :: Parser String
+stringLiteral = parseChar '"' *> parseAny <* parseChar '"'
 
 htmlText :: Parser HTMLValue
-htmlText = undefined
+htmlText = HTMLText <$> stringLiteral
 
-htmlParser :: Parser HTMLValue
-htmlParser = htmlString
+htmlAttributes :: Parser HTMLAttributes
+htmlAttributes = Map.fromList <$> sepBy ws parseAttribute
+    where
+        parseAttribute = liftA2 (,) (stringLiteral <* parseChar '=') stringLiteral
+
+htmlField :: Parser HTMLValue
+htmlField = Parser (\input -> 
+        case runParser (parseChar '<' *> htmlAttributes <* parseChar '>') input of
+            (Left (ParserError e)) -> Left $ ParserError $ "AttributeParser: " ++ e
+            (Right (ParserSuccess unparsed as)) -> do
+                (ParserSuccess unparsed' children) <- runParser htmlValue unparsed
+                Right $ ParserSuccess unparsed' $ HTMLField as children
+    )
+
+htmlValue :: Parser HTMLValue
+htmlValue = htmlSeq
+
+htmlSeq :: Parser HTMLValue
+htmlSeq = HTMLSeq <$> Parser f
+    where 
+        f input 
+            | input == "" = Right $ ParserSuccess "" []
+            | otherwise = do
+                (ParserSuccess unparsed parsed) <- runParser (many $ htmlField <|> htmlText) input
+                case unparsed of 
+                    "" -> Right $ ParserSuccess unparsed parsed 
+                    _ -> Left $ ParserError $ "Could not parse " ++ unparsed
 
 runHtmlParser :: String -> Either ParserError (ParserSuccess HTMLValue)
-runHtmlParser = runParser htmlParser
+runHtmlParser = runParser htmlValue
 
 main :: IO ()
 main = do
